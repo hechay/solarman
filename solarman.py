@@ -11,7 +11,9 @@ import os
 import sys
 import time
 import signal
-import mqtt
+import string
+from paho.mqtt import client as mqtt_client
+import random
 
 CONFIG_PATH = os.environ.get('CONFIG_PATH', os.getcwd() + "/")
 
@@ -133,6 +135,32 @@ def restruct_and_separate_current_data(data, device):
     except Exception as error:  # pylint: disable=broad-except
         print(f"{time_stamp()}: 😡 Error while processing data: {str(error)}")
         return None
+    
+def connect_mqtt(broker, port, client_id, username, password):
+    def on_connect(client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            print(f"{time_stamp()}: Connected to MQTT Broker!")
+        else:
+            print(f"{time_stamp()}: Failed to connect, return code {rc}")
+
+    client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2, client_id)
+    client.username_pw_set( username , password )
+    client.on_connect = on_connect
+    client.connect(broker, port)
+    return client
+
+def publish(client, topic, payload, debug=False):
+    result = client.publish(topic, payload)
+    status = result[0]
+    if status == 0:
+        if debug:
+            print(f"{time_stamp()}: Send {payload} to topic {topic}")
+    else:
+        print(f"{time_stamp()}: Failed to send message to topic {topic}")
+
+def generate_client_id(length=10):
+    """Generate a random client ID."""
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
 def run(config):
     """
@@ -175,6 +203,11 @@ def run(config):
     discard = ["code", "msg", "requestId", "success"]
     topic = config["mqtt"]["topic"]
 
+    client_id = generate_client_id()
+
+    client = connect_mqtt(config["mqtt"]["broker"], config["mqtt"]["port"], client_id, config["mqtt"]["username"] , config["mqtt"]["password"] )
+    client.loop_start()
+
     inverter_device_state = inverter_data["deviceState"] if inverter_data is not None and  "deviceState" in inverter_data else None
 
     if inverter_device_state is None or station_data is None or logger_data is None or station_data is None:
@@ -182,35 +215,39 @@ def run(config):
         return
 
     if inverter_device_state == 1:
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: ⚡ Inverter DeviceState: {inverter_device_state} -> Publishing MQTT...")
+        print(f"{time_stamp()}: ⚡ Inverter DeviceState: {inverter_device_state} -> Publishing MQTT...")
+        
         print(f"{time_stamp()}: ⚡ Sending station data to mqtt")
-        for i in station_data:
-            if station_data[i]:
-                if i not in discard:
-                    mqtt.message(config["mqtt"], topic + "/station/" + i, station_data[i], config["debug"])
+        for i, value in station_data.items():
+            if value and i not in discard:
+                publish(client, f"{topic}/station/{i}", value, config["debug"])
+
         print(f"{time_stamp()}: ⚡ Sending inverter data to mqtt")
-        for i in inverter_data:
-            if inverter_data[i]:
-                if i not in discard:
-                    mqtt.message(config["mqtt"], topic + "/inverter/" + i, inverter_data[i], config["debug"])
+        for i, value in inverter_data.items():
+            if value and i not in discard:
+                publish(client, f"{topic}/inverter/{i}", value, config["debug"])
+
         print(f"{time_stamp()}: ⚡ Sending inverter data list to mqtt")
         if inverter_data_list:
-            mqtt.message(config["mqtt"], topic + "/inverter/attributes", json.dumps(inverter_data_list), config["debug"])
+            publish(client, f"{topic}/inverter/attributes", json.dumps(inverter_data_list), config["debug"])
+
         print(f"{time_stamp()}: ⚡ Sending logger data to mqtt")
-        for i in logger_data:
-            if logger_data[i]:
-                if i not in discard:
-                    mqtt.message(config["mqtt"], topic + "/logger/" + i, logger_data[i], config["debug"])
+        for i, value in logger_data.items():
+            if value and i not in discard:
+                publish(client, f"{topic}/logger/{i}", value, config["debug"])
+
         print(f"{time_stamp()}: ⚡ Sending logger data list to mqtt")
         if logger_data_list:
-            mqtt.message(config["mqtt"], topic + "/logger/attributes", json.dumps(logger_data_list), config["debug"])
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: ⚡ Inverter DeviceState: {inverter_device_state} -> Publishing MQTT Completed")
+            publish(client, f"{topic}/logger/attributes", json.dumps(logger_data_list), config["debug"])
+
+        print(f"{time_stamp()}: ⚡ Inverter DeviceState: {inverter_device_state} -> Publishing MQTT Completed")
     else:
         print(f"{time_stamp()}: ⚡ Device is not online (may be due to nighttime shutdown), sending only status to mqtt")
-        mqtt.message(config["mqtt"], topic + "/inverter/deviceState", inverter_data["deviceState"], config["debug"])
-        mqtt.message(config["mqtt"], topic + "/logger/deviceState", logger_data["deviceState"], config["debug"])
-        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')}: ⚡ Inverter DeviceState: {inverter_device_state} -> Only Status MQTT publish")
+        publish(client, f"{topic}/inverter/deviceState", inverter_data["deviceState"], config["debug"])
+        publish(client, f"{topic}/logger/deviceState", logger_data["deviceState"], config["debug"])
+        print(f"{time_stamp()}: ⚡ Inverter DeviceState: {inverter_device_state} -> Only Status MQTT publish")
 
+    client.loop_stop()
 
 if __name__ == "__main__":
     
